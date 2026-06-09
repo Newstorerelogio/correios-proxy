@@ -2,14 +2,13 @@ const express = require('express');
 const axios = require('axios').default;
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
+const { wrapper: wrapperAxios } = require('axios-cookiejar-support');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const TWOCAPTCHA_KEY = 'b097c2c70ebbc16c98f23c89d4b4dc4f';
-const CAPTCHA_IMG_URL = 'https://rastreamento.correios.com.br/core/securimage/securimage_show.php';
-const RASTREIO_URL = 'https://rastreamento.correios.com.br/app/resultado.php';
-
+const BASE_URL = 'https://rastreamento.correios.com.br';
 const USUARIO = 'newstorerj';
 const SENHA = 'Ggjt7017+@';
 const LOGIN_URL = 'https://cas.correios.com.br/login?service=https%3A%2F%2Fportalimportador.correios.com.br%2Fpages%2FpesquisarRemessaImportador%2FpesquisarRemessaImportador.jsf';
@@ -17,26 +16,47 @@ const PORTAL_URL = 'https://portalimportador.correios.com.br/pages/pesquisarReme
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
 
-async function resolverCaptcha() {
-  const imgResp = await axios.get(CAPTCHA_IMG_URL, {
+async function resolverCaptchaComSessao() {
+  // Cria sessao com cookie jar para manter o mesmo session id
+  const jar = new CookieJar();
+  const client = wrapper(axios.create({ jar, withCredentials: true }));
+
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9'
+  };
+
+  // Passo 1: visitar a pagina principal para obter o cookie de sessao
+  await client.get(BASE_URL + '/app/index.php', { headers });
+
+  // Passo 2: baixar a imagem do captcha com o mesmo cookie de sessao
+  const imgResp = await client.get(BASE_URL + '/core/securimage/securimage_show.php', {
     responseType: 'arraybuffer',
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rastreamento.correios.com.br/app/index.php' }
+    headers: { ...headers, 'Referer': BASE_URL + '/app/index.php' }
   });
   const base64 = Buffer.from(imgResp.data).toString('base64');
 
+  // Passo 3: enviar para 2captcha resolver
   const sendResp = await axios.post('https://2captcha.com/in.php', {
     key: TWOCAPTCHA_KEY,
     method: 'base64',
     body: base64,
-    json: 1
+    json: 1,
+    min_len: 4,
+    max_len: 8,
+    language: 2
   });
   if (sendResp.data.status !== 1) throw new Error('2captcha envio: ' + JSON.stringify(sendResp.data));
   const captchaId = sendResp.data.request;
 
-  for (let t = 0; t < 20; t++) {
+  // Passo 4: aguardar resolucao
+  for (let t = 0; t < 24; t++) {
     await new Promise(r => setTimeout(r, 3000));
     const res = await axios.get('https://2captcha.com/res.php?key=' + TWOCAPTCHA_KEY + '&action=get&id=' + captchaId + '&json=1');
-    if (res.data.status === 1) return res.data.request;
+    if (res.data.status === 1) {
+      return { captchaText: res.data.request, client, headers };
+    }
     if (res.data.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha: ' + res.data.request);
   }
   throw new Error('2captcha timeout');
@@ -45,16 +65,14 @@ async function resolverCaptcha() {
 app.get('/rastrear/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
-    const captchaText = await resolverCaptcha();
-    const r = await axios.get(RASTREIO_URL, {
+    const { captchaText, client, headers } = await resolverCaptchaComSessao();
+    console.log('Captcha resolvido:', captchaText);
+
+    const r = await client.get(BASE_URL + '/app/resultado.php', {
       params: { objeto: codigo, captcha: captchaText, mqs: 'S' },
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://rastreamento.correios.com.br/app/index.php'
-      },
-      timeout: 30000
+      headers: { ...headers, 'Accept': 'application/json, text/plain, */*', 'Referer': BASE_URL + '/app/index.php' }
     });
+    console.log('Rastreio status:', r.status, 'data:', JSON.stringify(r.data).substring(0, 200));
     return res.json(r.data);
   } catch (err) {
     console.error('Erro rastreio:', err.message);
