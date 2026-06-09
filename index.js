@@ -10,25 +10,70 @@ const USUARIO = 'newstorerj';
 const SENHA = 'Ggjt7017+@';
 const LOGIN_URL = 'https://cas.correios.com.br/login?service=https%3A%2F%2Fportalimportador.correios.com.br%2Fpages%2FpesquisarRemessaImportador%2FpesquisarRemessaImportador.jsf';
 const PORTAL_URL = 'https://portalimportador.correios.com.br/pages/pesquisarRemessaImportador/pesquisarRemessaImportador.jsf';
-const RASTREIO_URL = 'https://proxyapp.correios.com.br/v1/sro-rastro/';
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
 
-// Endpoint de rastreamento (contorna bloqueio de IP do Google)
+// Endpoint de rastreamento usando API pública dos Correios (SRO)
 app.get('/rastrear/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
-    const response = await axios.get(RASTREIO_URL + codigo, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 30000
-    });
+    // Tenta API pública dos Correios
+    const response = await axios.post(
+      'https://api.correios.com.br/srorastro/v1/objetos',
+      { codObjeto: [codigo] },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        timeout: 30000
+      }
+    );
     return res.json(response.data);
-  } catch (err) {
-    console.error('Erro rastreio:', err.message);
-    return res.status(500).json({ erro: err.message });
+  } catch (err1) {
+    // Fallback: tenta outro endpoint
+    try {
+      const response2 = await axios.get(
+        `https://www.linketrack.com/track/json?user=teste&token=1abcd01234567890123456789012345678901234&codigo=${codigo}`,
+        { timeout: 30000 }
+      );
+      // Converter para formato esperado pelo Apps Script
+      const data = response2.data;
+      const eventos = (data.eventos || []).map(e => ({
+        descricao: e.status || '',
+        dtHrCriado: e.data ? e.data + ' ' + (e.hora || '') : '',
+        dtHrOcorrido: e.data ? e.data + ' ' + (e.hora || '') : '',
+        unidade: { endereco: { cidade: e.local || '' } }
+      }));
+      return res.json({
+        objetos: [{
+          codObjeto: codigo,
+          eventos: eventos
+        }]
+      });
+    } catch (err2) {
+      // Fallback final: buscar direto no site dos Correios
+      try {
+        const response3 = await axios.get(
+          `https://rastreamento.correios.com.br/app/resultado.php?objeto=${codigo}`,
+          {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+              'Accept': 'application/json, text/plain, */*',
+              'Referer': 'https://rastreamento.correios.com.br/'
+            },
+            timeout: 30000
+          }
+        );
+        const d = response3.data;
+        if (d && d.objetos) return res.json(d);
+        return res.json({ objetos: [] });
+      } catch (err3) {
+        console.error('Todos os endpoints falharam:', err3.message);
+        return res.status(500).json({ erro: err3.message });
+      }
+    }
   }
 });
 
@@ -77,7 +122,7 @@ app.get('/boleto/:codigo', async (req, res) => {
 
     return res.json({ codigo, valor, boleto, travado: false });
   } catch (err) {
-    console.error('Erro:', err.message);
+    console.error('Erro boleto:', err.message);
     return res.status(500).json({ erro: err.message });
   }
 });
