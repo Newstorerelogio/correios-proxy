@@ -6,6 +6,10 @@ const { CookieJar } = require('tough-cookie');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const TWOCAPTCHA_KEY = 'b097c2c70ebbc16c98f23c89d4b4dc4f';
+const CAPTCHA_IMG_URL = 'https://rastreamento.correios.com.br/app/captcha.php';
+const RASTREIO_URL = 'https://rastreamento.correios.com.br/app/resultado.php';
+
 const USUARIO = 'newstorerj';
 const SENHA = 'Ggjt7017+@';
 const LOGIN_URL = 'https://cas.correios.com.br/login?service=https%3A%2F%2Fportalimportador.correios.com.br%2Fpages%2FpesquisarRemessaImportador%2FpesquisarRemessaImportador.jsf';
@@ -13,35 +17,67 @@ const PORTAL_URL = 'https://portalimportador.correios.com.br/pages/pesquisarReme
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
 
+// Resolve captcha via 2captcha
+async function resolverCaptcha() {
+  // Baixa imagem do captcha
+  const imgResp = await axios.get(CAPTCHA_IMG_URL, {
+    responseType: 'arraybuffer',
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rastreamento.correios.com.br/' }
+  });
+  const base64 = Buffer.from(imgResp.data).toString('base64');
+
+  // Envia para 2captcha
+  const sendResp = await axios.post('https://2captcha.com/in.php', {
+    key: TWOCAPTCHA_KEY,
+    method: 'base64',
+    body: base64,
+    json: 1
+  });
+  if (sendResp.data.status !== 1) throw new Error('2captcha erro envio: ' + JSON.stringify(sendResp.data));
+  const captchaId = sendResp.data.request;
+
+  // Aguarda resolução (polling)
+  for (let t = 0; t < 20; t++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const res = await axios.get(`https://2captcha.com/res.php?key=${TWOCAPTCHA_KEY}&action=get&id=${captchaId}&json=1`);
+    if (res.data.status === 1) return res.data.request;
+    if (res.data.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha erro: ' + res.data.request);
+  }
+  throw new Error('2captcha timeout');
+}
+
+// Endpoint de rastreamento
 app.get('/rastrear/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
-    const r = await axios.get(
-      `https://rastreamento.correios.com.br/app/resultado.php?objeto=${codigo}`,
-      { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://rastreamento.correios.com.br/' }, timeout: 30000 }
-    );
-    if (r.data && r.data.objetos) return res.json(r.data);
-    if (Array.isArray(r.data)) return res.json({ objetos: r.data });
-  } catch (e1) { console.log('F1:', e1.message); }
-
-  try {
-    const r2 = await axios.get(
-      `https://proxyapp.correios.com.br/v1/sro-rastro/${codigo}`,
-      { headers: { 'Accept': 'application/json', 'User-Agent': 'CorreiosApp/8.3.0 Android/11', 'app-version': '8.3.0' }, timeout: 30000 }
-    );
-    return res.json(r2.data);
-  } catch (e2) {
-    console.error('Todos falharam:', e2.message);
-    return res.status(500).json({ erro: e2.message });
+    const captchaText = await resolverCaptcha();
+    const r = await axios.get(RASTREIO_URL, {
+      params: { objeto: codigo, captcha: captchaText, mqs: 'S' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://rastreamento.correios.com.br/app/index.php'
+      },
+      timeout: 30000
+    });
+    return res.json(r.data);
+  } catch (err) {
+    console.error('Erro rastreio:', err.message);
+    return res.status(500).json({ erro: err.message });
   }
 });
 
+// Endpoint de boleto
 app.get('/boleto/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
     const jar = new CookieJar();
     const client = wrapper(axios.create({ jar, withCredentials: true }));
-    const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'pt-BR,pt;q=0.9' };
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'pt-BR,pt;q=0.9'
+    };
     const r1 = await client.get(LOGIN_URL, { headers });
     const html1 = r1.data;
     const lt = (html1.match(/name="lt"\s+value="([^"]+)"/) || [])[1] || '';
