@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const TWOCAPTCHA_KEY = 'b097c2c70ebbc16c98f23c89d4b4dc4f';
-const CAPTCHA_IMG_URL = 'https://rastreamento.correios.com.br/app/captcha.php';
+const CAPTCHA_IMG_URL = 'https://rastreamento.correios.com.br/core/securimage/securimage_show.php';
 const RASTREIO_URL = 'https://rastreamento.correios.com.br/app/resultado.php';
 
 const USUARIO = 'newstorerj';
@@ -17,36 +17,31 @@ const PORTAL_URL = 'https://portalimportador.correios.com.br/pages/pesquisarReme
 
 app.get('/', (req, res) => res.json({ status: 'ok' }));
 
-// Resolve captcha via 2captcha
 async function resolverCaptcha() {
-  // Baixa imagem do captcha
   const imgResp = await axios.get(CAPTCHA_IMG_URL, {
     responseType: 'arraybuffer',
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rastreamento.correios.com.br/' }
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://rastreamento.correios.com.br/app/index.php' }
   });
   const base64 = Buffer.from(imgResp.data).toString('base64');
 
-  // Envia para 2captcha
   const sendResp = await axios.post('https://2captcha.com/in.php', {
     key: TWOCAPTCHA_KEY,
     method: 'base64',
     body: base64,
     json: 1
   });
-  if (sendResp.data.status !== 1) throw new Error('2captcha erro envio: ' + JSON.stringify(sendResp.data));
+  if (sendResp.data.status !== 1) throw new Error('2captcha envio: ' + JSON.stringify(sendResp.data));
   const captchaId = sendResp.data.request;
 
-  // Aguarda resolução (polling)
   for (let t = 0; t < 20; t++) {
     await new Promise(r => setTimeout(r, 3000));
-    const res = await axios.get(`https://2captcha.com/res.php?key=${TWOCAPTCHA_KEY}&action=get&id=${captchaId}&json=1`);
+    const res = await axios.get('https://2captcha.com/res.php?key=' + TWOCAPTCHA_KEY + '&action=get&id=' + captchaId + '&json=1');
     if (res.data.status === 1) return res.data.request;
-    if (res.data.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha erro: ' + res.data.request);
+    if (res.data.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha: ' + res.data.request);
   }
   throw new Error('2captcha timeout');
 }
 
-// Endpoint de rastreamento
 app.get('/rastrear/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
@@ -67,7 +62,6 @@ app.get('/rastrear/:codigo', async (req, res) => {
   }
 });
 
-// Endpoint de boleto
 app.get('/boleto/:codigo', async (req, res) => {
   const { codigo } = req.params;
   try {
